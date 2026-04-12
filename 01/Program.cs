@@ -21,6 +21,9 @@ public class Program
 
 	[DllImport("libportaudio.dylib")]
 	public static extern PaError Pa_Terminate();
+	
+	[DllImport("libportaudio.dylib")]
+	public static extern PaError Pa_OpenDefaultStream();
 
 	[StructLayout(LayoutKind.Sequential)]
 	public struct PaDeviceInfo
