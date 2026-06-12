@@ -16,6 +16,7 @@ public class Program
     private static List<float> _wChannel = new List<float>();
     private static List<float> _xChannel = new List<float>();
     private static List<float> _yChannel = new List<float>();
+	private static List<float> _zChannel = new List<float>();
     private static Dictionary<string, (List<float> L, List<float> R)> _hrirCache = new();
 
     static float _azimuth = 0f;
@@ -28,7 +29,7 @@ public class Program
 	static int _ringWritePos = 0; // バックグラウンドが書く位置
 	static float[] _fillOverlapL = new float[511];
 	static float[] _fillOverlapR = new float[511];
-	static int BLOCK_SIZE = 4096; // バックグラウンドで一度に処理するフレーム数
+	static int BLOCK_SIZE = 2048; // バックグラウンドで一度に処理するフレーム数
 	static int _playbackSamplePos = 0; // 元音声の再生位置（コールバックが進める）
 
 
@@ -43,7 +44,7 @@ public class Program
 	static void ResetBuffer()
 	{
 		_running = false;
-		Thread.Sleep(50); // スレッドが止まるのを待つ
+		Thread.Sleep(150); // スレッドが止まるのを待つ
 		
 		_sourcePos = _playbackSamplePos; // ← 元音声の位置を使う
 		_ringWritePos = _ringReadPos;
@@ -69,11 +70,31 @@ public class Program
 			if (_sourcePos >= _wChannel.Count) break;
 
 			int blockSize = Math.Min(BLOCK_SIZE, _wChannel.Count - _sourcePos);
-			var block = _wChannel.GetRange(_sourcePos, blockSize);
+			var blockW = _wChannel.GetRange(_sourcePos, blockSize);
+			var blockX = _xChannel.GetRange(_sourcePos, blockSize);
+			var blockY = _yChannel.GetRange(_sourcePos, blockSize);
+			var blockZ = _zChannel.GetRange(_sourcePos, blockSize);
 
 			var (hrirL, hrirR) = _hrirCache[_currentHrirFile];
-			var convL = Convolve(block, hrirL);
-			var convR = Convolve(block, hrirR);
+
+			var convWL = Convolve(blockW, hrirL);
+			var convXL = Convolve(blockX, hrirL);
+			var convYL = Convolve(blockY, hrirL);
+			var convZL = Convolve(blockZ, hrirL);
+
+			var convWR = Convolve(blockW, hrirR);
+			var convXR = Convolve(blockX, hrirR);
+			var convYR = Convolve(blockY, hrirR);
+			var convZR = Convolve(blockZ, hrirR);
+
+			// サンプルごとに足し合わせる
+			var convL = new List<float>(convWL.Count);
+			var convR = new List<float>(convWR.Count);
+			for (int i = 0; i < convWL.Count; i++)
+			{
+				convL.Add(convWL[i] + convXL[i] + convYL[i] + convZL[i]);
+				convR.Add(convWR[i] + convXR[i] + convYR[i] + convZR[i]);
+			}
 
 			// 持ち越し分を足し合わせる
 			int addLen = Math.Min(_fillOverlapL.Length, convL.Count);
@@ -121,83 +142,83 @@ public class Program
 		for (int i = 0; i < outLen; i++) output.Add(sigC[i].Real);
 		return output;
 	}
-    static (List<float> L, List<float> R) ReadHrirFile(string filePath)
-    {
-        var l = new List<float>();
-        var r = new List<float>();
+	static (List<float> L, List<float> R) ReadHrirFile(string filePath)
+	{
+		var l = new List<float>();
+		var r = new List<float>();
 
-        using (var reader = new BinaryReader(File.OpenRead(filePath)))
-        {
+		using (var reader = new BinaryReader(File.OpenRead(filePath)))
+		{
 			reader.ReadBytes(4); // "RIFF"
 			reader.ReadBytes(4); // ChunkSize
 			reader.ReadBytes(4); // "WAVE"
-            short channels = 0;
-            int sampleRate = 0;
-            short bitsPerSample = 0;
-            uint dataSize = 0;
-            while (reader.BaseStream.Position < reader.BaseStream.Length)
-            {
-                string chunkId = Encoding.ASCII.GetString(reader.ReadBytes(4));
-                uint chunkSize = reader.ReadUInt32();
+			short channels = 0;
+			int sampleRate = 0;
+			short bitsPerSample = 0;
+			uint dataSize = 0;
+			while (reader.BaseStream.Position < reader.BaseStream.Length)
+			{
+				string chunkId = Encoding.ASCII.GetString(reader.ReadBytes(4));
+				uint chunkSize = reader.ReadUInt32();
 
-                if (chunkId == "fmt ")
-                {
-                    reader.ReadBytes(2); // FormatTag
-                    channels      = reader.ReadInt16();
-                    sampleRate    = reader.ReadInt32();
-                    reader.ReadBytes(4); // AvgBytesPerSec
-                    reader.ReadBytes(2); // BlockAlign
-                    bitsPerSample = reader.ReadInt16();
+				if (chunkId == "fmt ")
+				{
+					reader.ReadBytes(2); // FormatTag
+					channels      = reader.ReadInt16();
+					sampleRate    = reader.ReadInt32();
+					reader.ReadBytes(4); // AvgBytesPerSec
+					reader.ReadBytes(2); // BlockAlign
+					bitsPerSample = reader.ReadInt16();
 
-                    int remaining = (int)chunkSize - 16;
-                    if (remaining > 0) reader.ReadBytes(remaining);
-                    if (chunkSize % 2 != 0)
-                        reader.ReadByte();
-                }
-                else if (chunkId == "data")
-                {
-                    dataSize = chunkSize;
-                    int totalFrames = (int)(dataSize / (channels * (bitsPerSample / 8)));
+					int remaining = (int)chunkSize - 16;
+					if (remaining > 0) reader.ReadBytes(remaining);
+					if (chunkSize % 2 != 0)
+						reader.ReadByte();
+				}
+				else if (chunkId == "data")
+				{
+					dataSize = chunkSize;
+					int totalFrames = (int)(dataSize / (channels * (bitsPerSample / 8)));
 
-                    for (int i = 0; i < totalFrames; i++) 
-                    {
-                        float[] frame = new float[channels];
-                        for (int ch = 0; ch < channels; ch++)
-                        {
-                            byte[] buf = reader.ReadBytes(3);
-                            int rawInt = buf[0] | (buf[1] << 8) | (buf[2] << 16);
-                            if ((rawInt & 0x800000) != 0)
-                                rawInt |= unchecked((int)0xFF000000);
-                            frame[ch] = rawInt / 8388607f;
-                        }
+					for (int i = 0; i < totalFrames; i++) 
+					{
+						float[] frame = new float[channels];
+						for (int ch = 0; ch < channels; ch++)
+						{
+							byte[] buf = reader.ReadBytes(3);
+							int rawInt = buf[0] | (buf[1] << 8) | (buf[2] << 16);
+							if ((rawInt & 0x800000) != 0)
+								rawInt |= unchecked((int)0xFF000000);
+							frame[ch] = rawInt / 8388607f;
+						}
 
-                        l.Add(frame[0]); 
-                        r.Add(frame[1]);
-                    }
-                    break;
-                }
-                else
-                {
-                    reader.ReadBytes((int)chunkSize);
-                    if (chunkSize % 2 != 0)
-                        reader.ReadByte();
-                }
-            }
-        }
+						l.Add(frame[0]); 
+						r.Add(frame[1]);
+					}
+					break;
+				}
+				else
+				{
+					reader.ReadBytes((int)chunkSize);
+					if (chunkSize % 2 != 0)
+						reader.ReadByte();
+				}
+			}
+		}
 
-        return (l, r);
-    }
+		return (l, r);
+	}
 
-    static void LoadAllHrirs(string hrirDir)
-    {
-        var files = Directory.GetFiles(hrirDir, "*.wav");
-        foreach (var file in files)
-        {
-            var (l, r) = ReadHrirFile(file); 
-            _hrirCache[file] = (l, r);
-        }
-        Console.WriteLine($"HRIR {_hrirCache.Count}件読み込み完了");
-    }
+	static void LoadAllHrirs(string hrirDir)
+	{
+		var files = Directory.GetFiles(hrirDir, "*.wav");
+		foreach (var file in files)
+		{
+			var (l, r) = ReadHrirFile(file); 
+			_hrirCache[file] = (l, r);
+		}
+		Console.WriteLine($"HRIR {_hrirCache.Count}件読み込み完了");
+	}
 
     // static int Callback(IntPtr input, IntPtr output, ulong frameCount, IntPtr timeInfo, uint statusFlags, IntPtr userData)
     // {
@@ -277,43 +298,43 @@ public class Program
 		return 0;
 	}
 
-    static string GetNearestHrirFile(string hrirDir, float azimuth, float elevation)
-    {
-        var files = Directory.GetFiles(hrirDir, "*.wav");
-        
-        string nearest = files[0];
-        float minDist = float.MaxValue;
+	static string GetNearestHrirFile(string hrirDir, float azimuth, float elevation)
+	{
+		var files = Directory.GetFiles(hrirDir, "*.wav");
+		
+		string nearest = files[0];
+		float minDist = float.MaxValue;
 
-        foreach (var file in files)
-        {
-            var (azi, ele) = ParseHrirFileName(file);
-            
-            float dist = MathF.Sqrt(MathF.Pow(azi - azimuth, 2) + MathF.Pow(ele - elevation, 2));
-            
-            if (dist < minDist)
-            {
-                minDist = dist;
-                nearest = file;
-            }
-        }
-        return nearest;
-    }
+		foreach (var file in files)
+		{
+			var (azi, ele) = ParseHrirFileName(file);
+			
+			float dist = MathF.Sqrt(MathF.Pow(azi - azimuth, 2) + MathF.Pow(ele - elevation, 2));
+			
+			if (dist < minDist)
+			{
+				minDist = dist;
+				nearest = file;
+			}
+		}
+		return nearest;
+	}
 
-    static (float azimuth, float elevation) ParseHrirFileName(string filePath)
-    {
-        string fileName = Path.GetFileNameWithoutExtension(filePath);
-        var parts = fileName.Split('_');
+	static (float azimuth, float elevation) ParseHrirFileName(string filePath)
+	{
+		string fileName = Path.GetFileNameWithoutExtension(filePath);
+		var parts = fileName.Split('_');
 
-        float azimuth   = Convert.ToSingle(parts[1].Replace(',', '.'),
-            System.Globalization.CultureInfo.InvariantCulture);
-        float elevation = Convert.ToSingle(parts[3].Replace(',', '.'),
-            System.Globalization.CultureInfo.InvariantCulture);
-        return (azimuth, elevation);
-    }
+		float azimuth   = Convert.ToSingle(parts[1].Replace(',', '.'),
+			System.Globalization.CultureInfo.InvariantCulture);
+		float elevation = Convert.ToSingle(parts[3].Replace(',', '.'),
+			System.Globalization.CultureInfo.InvariantCulture);
+		return (azimuth, elevation);
+	}
     
     public static void Main()
     {
-        using (var reader = new BinaryReader(File.OpenRead("/Users/mths40035/Downloads/N016af31448123f639272.wav")))
+        using (var reader = new BinaryReader(File.OpenRead("/Users/mths40035/Downloads/Q31e35aa772ddaba53e02.wav")))
         {
             reader.ReadBytes(4); // "RIFF"
             reader.ReadBytes(4); // ChunkSize
@@ -363,6 +384,7 @@ public class Program
                         _wChannel.Add(frame[0]); 
                         _xChannel.Add(frame[1]);
                         _yChannel.Add(frame[2]);
+						_zChannel.Add(frame[3]);
                     }
                     break;
                 }
